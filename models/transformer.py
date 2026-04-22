@@ -216,3 +216,19 @@ class CausalTransformerWithKVCache(CausalTransformer):
         torch.cuda.synchronize()  # both events must be completed before calculating elapsed time.
         time_list.append(start_event[i].elapsed_time(end_event[i]))
     return time_list, samples
+
+  def samples(self, num_samples, use_kv_cache=True):
+    x = torch.zeros((num_samples, self.max_length), dtype=torch.long, device=self.positional_encoding.device)
+    x[:, 0] = self.vocab_size - 1
+    kv_cache = {} if use_kv_cache else None
+    with torch.no_grad():
+      for i in tqdm(range(self.max_length), desc="Generating samples"):
+        scores = self.forward(x[:, :i+1], kv_cache=kv_cache)  # use kv_cache
+        next_token_scores = scores[:, -1]
+        probs = torch.softmax(next_token_scores, dim=1)
+        next_token = torch.multinomial(probs, num_samples=1)
+        if i < self.max_length - 1:
+          x[:, i+1] = next_token.view(-1)
+        else:
+          samples = torch.cat((x[:, 1:], next_token), dim=1)
+    return samples
