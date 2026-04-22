@@ -20,7 +20,43 @@ class MultiHeadAttention(nn.Module):
     self.head_dim = embed_dim // num_heads
     self.scale = self.head_dim ** 0.5
 
-  def forward(self, query, key, value, attn_mask=None):
+  def kv_cache_forward(self, query, key, value, kv_cache=None):
+    N, S, D = query.shape
+    N, T, D = value.shape
+    H = self.n_head
+    D_H = self.head_dim
+
+    query_i = query[:, -1:]
+    key_i = key[:, -1:]
+    value_i = value[:, -1:]
+
+    Q_i = self.query(query_i).view(N, 1, H, D_H).permute(0, 2, 1, 3)
+    K_i_T = self.key(key_i).view(N, 1, H, D_H).permute(0, 2, 3, 1)
+    V_i = self.value(value_i).view(N, 1, H, D_H).permute(0, 2, 1, 3)
+
+    if 'K' in kv_cache and 'V' in kv_cache:
+      K_lt_i_T = kv_cache['K']
+      V_lt_i = kv_cache['V']
+      K_T = torch.cat((K_lt_i_T, K_i_T), dim=-1)
+      V = torch.cat((V_lt_i, V_i), dim=-2)
+    else:
+      K_T = K_i_T
+      V = V_i
+    # update kv_cache
+    kv_cache['K'] = K_T
+    kv_cache['V'] = V
+
+    attn_scores = Q_i @ K_T / self.scale
+
+    output = self.attn_drop(torch.softmax(attn_scores, dim=-1)) @ V
+    output = output.permute(0, 2, 1, 3).reshape(N, 1, D)
+    output = self.proj(output)
+    return output
+
+  def forward(self, query, key, value, attn_mask=None, kv_cache=None):
+    if kv_cache is not None:
+      return self.kv_cache_forward(query, key, value, kv_cache)
+
     N, S, D = query.shape
     N, T, D = value.shape
     H = self.n_head
@@ -68,9 +104,9 @@ class CausalTransformerDecoderLayer(nn.Module):
     self.dropout_self = nn.Dropout(dropout)
     self.dropout_ffn = nn.Dropout(dropout)
 
-  def forward(self, x, mask=None):
+  def forward(self, x, mask=None, kv_cache=None):
     shortcut = x
-    x = self.self_attn(query=x, key=x, value=x, attn_mask=mask)
+    x = self.self_attn(query=x, key=x, value=x, attn_mask=mask, kv_cache=kv_cache)
     x = self.dropout_self(x)
     x = x + shortcut
     x = self.norm_self(x)
@@ -94,10 +130,10 @@ class CausalTransformerDecoder(nn.Module):
     self.layers = clones(decoder_layer, num_layers)
     self.num_layers = num_layers
 
-  def forward(self, x, mask=None):
+  def forward(self, x, mask=None, kv_cache=None):
     output = x
     for mod in self.layers:
-      output = mod(output, mask=mask)
+      output = mod(output, mask=mask, kv_cache=kv_cache)
     return output
 
 
@@ -115,13 +151,13 @@ class CausalTransformer(nn.Module):
     self.transformer = CausalTransformerDecoder(decoder_layer, num_layers)
     self.output = nn.Linear(dim_model, vocab_size - 1)  # excluding the <bos> token
 
-  def forward(self, x):
+  def forward(self, x, kv_cache=None):
     N, S = x.shape
     # (N, S) -> (N, S, D)
     x = self.embedding(x)
     x = x + self.positional_encoding[:S]
     mask = torch.tril(torch.ones((S, S), device=x.device))
-    x = self.transformer(x, mask=mask)
+    x = self.transformer(x, mask=mask, kv_cache=kv_cache)
     # (N, S, D) -> (N, S)
     scores = self.output(x)
     return scores
@@ -151,3 +187,32 @@ class CausalTransformer(nn.Module):
         else:
           samples = torch.cat((x[:, 1:], next_token), dim=1)
     return samples
+
+
+class CausalTransformerWithKVCache(CausalTransformer):
+  def samples_with_timing(self, num_samples, use_kv_cache=True):
+    x = torch.zeros((num_samples, self.max_length), dtype=torch.long, device=self.positional_encoding.device)
+    x[:, 0] = self.vocab_size - 1
+    kv_cache = {} if use_kv_cache else None
+
+    start_event = [torch.cuda.Event(enable_timing=True) for _ in range(self.max_length)]
+    end_event = [torch.cuda.Event(enable_timing=True) for _ in range(self.max_length)]
+    time_list = []
+
+    with torch.no_grad():
+      for i in tqdm(range(self.max_length), desc="Generating samples"):
+        start_event[i].record()
+
+        scores = self.forward(x[:, :i+1], kv_cache=kv_cache)  # use kv_cache
+        next_token_scores = scores[:, -1]
+        probs = torch.softmax(next_token_scores, dim=1)
+        next_token = torch.multinomial(probs, num_samples=1)
+        if i < self.max_length - 1:
+          x[:, i+1] = next_token.view(-1)
+        else:
+          samples = torch.cat((x[:, 1:], next_token), dim=1)
+        
+        end_event[i].record()
+        torch.cuda.synchronize()  # both events must be completed before calculating elapsed time.
+        time_list.append(start_event[i].elapsed_time(end_event[i]))
+    return time_list, samples
