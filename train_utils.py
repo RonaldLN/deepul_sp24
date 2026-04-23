@@ -8,8 +8,9 @@ def train_val(model, data_loader, train_optimizer, epoch, epochs, lr_scheduler=N
   losses, total_loss, total_num, data_bar = [], 0.0, 0, tqdm(data_loader)
   with (torch.enable_grad() if is_train else torch.no_grad()):
     for data in data_bar:
-      data = data[0].to(device)
-      loss = model.loss(data)
+      data_size = data[0].size(0)
+      data = tuple(d.to(device) for d in data)
+      loss = model.loss(*data)
       losses.append(loss.item())
 
       if is_train:
@@ -20,8 +21,8 @@ def train_val(model, data_loader, train_optimizer, epoch, epochs, lr_scheduler=N
         if lr_scheduler is not None:
           lr_scheduler.step()
 
-      total_num += data.size(0)
-      total_loss += loss.item() * data.size(0)
+      total_num += data_size
+      total_loss += loss.item() * data_size
       data_bar.set_description(f'{"Train" if is_train else "Test"} Epoch [{epoch}/{epochs}] Loss: {total_loss / total_num:.4f}')
   
   return losses, total_loss / total_num

@@ -142,6 +142,9 @@ class CausalTransformer(nn.Module):
                dim_feedforward, max_length, dropout=0.1):
     super().__init__()
     self.vocab_size = vocab_size
+    # use self.vocab_size - 1, not -1; Embedding needs positive indices
+    self._bos = vocab_size - 1
+    self._null = 0  # use 0 as <null> for image
     self.max_length = max_length
 
     self.embedding = nn.Embedding(vocab_size, dim_model)
@@ -166,16 +169,15 @@ class CausalTransformer(nn.Module):
     N, S = x.shape
     target = x.long()
     # prepend <bos> token at the beginning
-    # use self.vocab_size - 1, not -1; Embedding needs positive indices
-    bos_token = torch.tensor(self.vocab_size - 1, device=x.device)
-    x = torch.cat((bos_token.expand(N, 1), x[:, :-1]), dim=1)
+    bos_token = self._bos * torch.ones((N, 1), dtype=torch.long, device=x.device)
+    x = torch.cat((bos_token, x[:, :-1]), dim=1)
     
     scores = self.forward(x)
     return F.cross_entropy(scores.permute(0, 2, 1), target)
   
   def samples(self, num_samples):
-    x = torch.zeros((num_samples, self.max_length), dtype=torch.long, device=self.positional_encoding.device)
-    x[:, 0] = self.vocab_size - 1
+    x = self._null * torch.ones((num_samples, self.max_length), dtype=torch.long, device=self.positional_encoding.device)
+    x[:, 0] = self._bos
     with torch.no_grad():
       for i in tqdm(range(self.max_length), desc="Generating samples"):
         scores = self.forward(x[:, :i+1])  # (N, i+1, vocab_size-1)
@@ -191,8 +193,8 @@ class CausalTransformer(nn.Module):
 
 class CausalTransformerWithKVCache(CausalTransformer):
   def samples_with_timing(self, num_samples, use_kv_cache=True):
-    x = torch.zeros((num_samples, self.max_length), dtype=torch.long, device=self.positional_encoding.device)
-    x[:, 0] = self.vocab_size - 1
+    x = self._null * torch.ones((num_samples, self.max_length), dtype=torch.long, device=self.positional_encoding.device)
+    x[:, 0] = self._bos
     kv_cache = {} if use_kv_cache else None
 
     start_event = [torch.cuda.Event(enable_timing=True) for _ in range(self.max_length)]
@@ -218,8 +220,8 @@ class CausalTransformerWithKVCache(CausalTransformer):
     return time_list, samples
 
   def samples(self, num_samples, use_kv_cache=True):
-    x = torch.zeros((num_samples, self.max_length), dtype=torch.long, device=self.positional_encoding.device)
-    x[:, 0] = self.vocab_size - 1
+    x = self._null * torch.ones((num_samples, self.max_length), dtype=torch.long, device=self.positional_encoding.device)
+    x[:, 0] = self._bos
     kv_cache = {} if use_kv_cache else None
     with torch.no_grad():
       for i in tqdm(range(self.max_length), desc="Generating samples"):
@@ -232,3 +234,18 @@ class CausalTransformerWithKVCache(CausalTransformer):
         else:
           samples = torch.cat((x[:, 1:], next_token), dim=1)
     return samples
+
+
+class TextCausalTransformer(CausalTransformerWithKVCache):
+  def __init__(self, char_to_idx, dim_model, num_heads, num_layers,
+               dim_feedforward, max_length, dropout=0.1):
+    vocab_size = len(char_to_idx)
+    super().__init__(vocab_size, dim_model, num_heads, num_layers,
+                     dim_feedforward, max_length, dropout)
+    # override <bos> and <null> tokens for text data
+    self._bos = char_to_idx['<bos>']
+    self._null = char_to_idx['<null>']
+  
+  def loss(self, x, target):
+    scores = self.forward(x)
+    return F.cross_entropy(scores.permute(0, 2, 1), target.long())
