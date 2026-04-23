@@ -132,8 +132,9 @@ class CausalTransformerDecoder(nn.Module):
 
   def forward(self, x, mask=None, kv_cache=None):
     output = x
-    for mod in self.layers:
-      output = mod(output, mask=mask, kv_cache=kv_cache)
+    for i, mod in enumerate(self.layers):
+      layer_cache = kv_cache[i] if kv_cache is not None else None
+      output = mod(output, mask=mask, kv_cache=layer_cache)
     return output
 
 
@@ -146,6 +147,7 @@ class CausalTransformer(nn.Module):
     self._bos = vocab_size - 1
     self._null = 0  # use 0 as <null> for image
     self.max_length = max_length
+    self.num_layers = num_layers
 
     self.embedding = nn.Embedding(vocab_size, dim_model)
     self.positional_encoding = nn.Parameter(torch.randn(max_length, dim_model))
@@ -195,7 +197,7 @@ class CausalTransformerWithKVCache(CausalTransformer):
   def samples_with_timing(self, num_samples, use_kv_cache=True):
     x = self._null * torch.ones((num_samples, self.max_length), dtype=torch.long, device=self.positional_encoding.device)
     x[:, 0] = self._bos
-    kv_cache = {} if use_kv_cache else None
+    kv_cache = [{} for _ in range(self.num_layers)] if use_kv_cache else None
 
     start_event = [torch.cuda.Event(enable_timing=True) for _ in range(self.max_length)]
     end_event = [torch.cuda.Event(enable_timing=True) for _ in range(self.max_length)]
@@ -222,7 +224,7 @@ class CausalTransformerWithKVCache(CausalTransformer):
   def samples(self, num_samples, use_kv_cache=True):
     x = self._null * torch.ones((num_samples, self.max_length), dtype=torch.long, device=self.positional_encoding.device)
     x[:, 0] = self._bos
-    kv_cache = {} if use_kv_cache else None
+    kv_cache = [{} for _ in range(self.num_layers)] if use_kv_cache else None
     with torch.no_grad():
       for i in tqdm(range(self.max_length), desc="Generating samples"):
         scores = self.forward(x[:, :i+1], kv_cache=kv_cache)  # use kv_cache
