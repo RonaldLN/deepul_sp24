@@ -59,9 +59,53 @@ class PixelCNN(nn.Module):
         for j in range(W):
           logits = self.forward(x)
           logits_next = logits[:, :, i, j]  # (num_samples, C*value_size)
-          logits_next = logits_next.view(num_samples*C, -1)  # (num_samples*C, value_size)
+          logits_next = logits_next.reshape(num_samples*C, -1)  # (num_samples*C, value_size)
           probs = torch.softmax(logits_next, dim=1)
           next = torch.multinomial(probs, num_samples=1)  # (num_samples*C,)
           next = next.view(-1, C)  # (num_samples, C)
           x[:, :, i, j] = next
     return x
+
+
+class ResidualBlock(nn.Module):
+  def __init__(self, n_filters):
+    super().__init__()
+    self.conv_layers = nn.ModuleList([
+      nn.Conv2d(n_filters*2, n_filters, 1),
+      MaskedConv2d('B', n_filters, n_filters, 7, padding=3),
+      nn.Conv2d(n_filters, n_filters*2, 1)
+    ])
+    self.norm_layers = nn.ModuleList([
+      nn.LayerNorm(n_filters),
+      nn.LayerNorm(n_filters),
+      nn.LayerNorm(n_filters*2)
+    ])
+  
+  def forward(self, x):
+    shortcut = x
+    for conv, norm in zip(self.conv_layers, self.norm_layers):
+      x = conv(x)
+      # (N, C, H, W) -> (N, H, W, C)
+      x = x.permute(0, 2, 3, 1)
+      x = norm(x)
+      # (N, H, W, C) -> (N, C, H, W)
+      x = x.permute(0, 3, 1, 2)
+      x = F.relu(x)
+    x = x + shortcut
+    return x
+
+
+class ColorPixelCNN(PixelCNN):
+  def __init__(self, image_h, image_w, in_channels, n_filters, n_blocks, value_size):
+    # not use PixelCNN's init method
+    nn.Module.__init__(self)
+    self.image_h = image_h
+    self.image_w = image_w
+    self.in_channels = in_channels
+
+    self.layers = nn.ModuleList([
+      MaskedConv2d('A', in_channels, n_filters*2, 7, padding=3),
+      *[ResidualBlock(n_filters) for _ in range(n_blocks)]
+    ])
+    out_channels = in_channels * value_size
+    self.logits_layer = nn.Conv2d(n_filters*2, out_channels, 1, padding=0)
