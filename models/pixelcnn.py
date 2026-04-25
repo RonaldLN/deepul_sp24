@@ -47,8 +47,9 @@ class PixelCNN(nn.Module):
   def loss(self, x):
     N, C, H, W = x.shape
     logits = self.forward(x)
-    logits = logits.view(N, -1, C, H, W)
-    loss = F.cross_entropy(logits, x.long())  # compute on dim=1
+    logits = logits.reshape(N * C, -1, H, W)
+    target = x.view(N * C, H, W).long()
+    loss = F.cross_entropy(logits, target)  # compute on dim=1
     return loss
 
   def samples(self, num_samples):
@@ -59,6 +60,7 @@ class PixelCNN(nn.Module):
         for j in range(W):
           logits = self.forward(x)
           logits_next = logits[:, :, i, j]  # (num_samples, C*value_size)
+          # Dimension splitting logic must match exactly with the `loss` method
           logits_next = logits_next.reshape(num_samples*C, -1)  # (num_samples*C, value_size)
           probs = torch.softmax(logits_next, dim=1)
           next = torch.multinomial(probs, num_samples=1)  # (num_samples*C,)
