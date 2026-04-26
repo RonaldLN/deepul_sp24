@@ -1,3 +1,5 @@
+### HW 1
+
 # q1a's model
 from .softmax_regression import *
 
@@ -9,3 +11,8 @@ from .pixelcnn import *
 
 # q3abc's, q4b's, q5a's and q6a's model
 from .transformer import *
+
+### HW 2
+
+# q1's, q2ab's and q3's model
+from .vae import *
