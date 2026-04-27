@@ -43,6 +43,9 @@ class VAE(nn.Module):
     out = mean + eps * var**0.5
     return out
 
+  def reparameterize_x(self, mean, var):
+    return self.reparameterize(mean, var)
+
   def kl_divergence(self, z_mean, z_var):
     # KL = Eq[log(q) - log(p)]
     #    = -0.5 log(var) - 0.5 E[(z-mu)^2/var] + 0.5 E[z^2]
@@ -78,10 +81,10 @@ class VAE(nn.Module):
     with torch.no_grad():
       decoded_mean, decoded_var = self.decode(z)
       if with_noise:
-        x = self.reparameterize(decoded_mean, decoded_var)
+        x = self.reparameterize_x(decoded_mean, decoded_var)
       else:
         zero_var = torch.zeros_like(decoded_mean)
-        x = self.reparameterize(decoded_mean, zero_var)
+        x = self.reparameterize_x(decoded_mean, zero_var)
     return x
 
   def reconstruct(self, x):
@@ -90,7 +93,7 @@ class VAE(nn.Module):
       z_mean, z_var = self.encode(x)
       z = self.reparameterize(z_mean, z_var)
       decoded_mean, decoded_var = self.decode(z)
-      recon_x = self.reparameterize(decoded_mean, decoded_var)  # (N, D)
+      recon_x = self.reparameterize_x(decoded_mean, decoded_var)  # (N, D)
       recon_x = recon_x.view(x.shape)
       output = torch.cat((x, recon_x))
     return output
@@ -112,7 +115,7 @@ class VAE(nn.Module):
       z_interp = z_interp.view(n_interp * N//2, -1)
 
       decoded_mean, decoded_var = self.decode(z_interp)
-      recon_x = self.reparameterize(decoded_mean, decoded_var)
+      recon_x = self.reparameterize_x(decoded_mean, decoded_var)
       recon_x = recon_x.view(n_interp * N//2, *x.shape[1:])
     return recon_x
 
@@ -156,13 +159,13 @@ class ConvVAE(VAE):
     x_var = torch.ones_like(x_mean)  # (N, C, H, W)
     return x_mean, x_var
 
-  def reparameterize(self, mean, var):
+  def reparameterize_x(self, mean, var):
     out = super().reparameterize(mean, var)
     out = torch.sigmoid(out)  # ensure the output is between 0 and 1
     return out
 
   def compute_recon_loss(self, x, decoded_mean, decoded_var):
     N = x.shape[0]
-    recon_x = self.reparameterize(decoded_mean, decoded_var)
+    recon_x = self.reparameterize_x(decoded_mean, decoded_var)
     recon_loss = F.mse_loss(recon_x, x, reduction='sum') / N  # only average over the batch dimension
     return recon_loss
