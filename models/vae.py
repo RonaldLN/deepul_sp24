@@ -110,9 +110,10 @@ class VAE(nn.Module):
       z_end = self.reparameterize(z_end_mean, z_end_var)
 
       z_diff = z_end - z_start
-      interp_ratios = torch.arange(n_interp, device=next(self.parameters()).device).view(-1, 1, 1) / n_interp
+      interp_ratios = torch.arange(n_interp, device=next(self.parameters()).device) / n_interp
+      interp_ratios = interp_ratios.view(-1, *[1] * x.dim())  # (n_interp, 1, ..., 1) to broadcast with z_start and z_end
       z_interp = z_start + z_diff * interp_ratios  # (N, D) + (N, D) * (n_interp, 1, 1) -> (n_interp, N, D)
-      z_interp = z_interp.view(n_interp * N//2, -1)
+      z_interp = z_interp.view(n_interp * N//2, *z_start.shape[1:])
 
       decoded_mean, decoded_var = self.decode(z_interp)
       recon_x = self.reparameterize_x(decoded_mean, decoded_var)
@@ -160,7 +161,7 @@ class ConvVAE(VAE):
     return x_mean, x_var
 
   def reparameterize_x(self, mean, var):
-    out = super().reparameterize(mean, var)
+    out = self.reparameterize(mean, var)
     out = torch.sigmoid(out)  # ensure the output is between 0 and 1
     return out
 
@@ -169,3 +170,137 @@ class ConvVAE(VAE):
     recon_x = self.reparameterize_x(decoded_mean, decoded_var)
     recon_loss = F.mse_loss(recon_x, x, reduction='sum') / N  # only average over the batch dimension
     return recon_loss
+
+
+class HierVAEEncoderLayer(nn.Module):
+  def __init__(self):
+    super().__init__()
+    self.layers = nn.Sequential(
+      nn.Conv2d(3 + 12, 32, 3, padding=1), # [32, 32, 32]
+      nn.LayerNorm([32, 32, 32]),
+      nn.ReLU(),
+      nn.Conv2d(32, 64, 3, stride=2, padding=1), # [64, 16, 16]
+      nn.LayerNorm([64, 16, 16]),
+      nn.ReLU(),
+      nn.Conv2d(64, 64, 3, stride=2, padding=1), # [64, 8, 8]
+      nn.LayerNorm([64, 8, 8]),
+      nn.ReLU(),
+      nn.Conv2d(64, 64, 3, stride=2, padding=1), # [64, 4, 4]
+      nn.LayerNorm([64, 4, 4]),
+      nn.ReLU(),
+      nn.Conv2d(64, 64, 3, stride=2, padding=1), # [64, 2, 2]
+      nn.LayerNorm([64, 2, 2]),
+      nn.ReLU(),
+      nn.Conv2d(64, 12*2, 3, padding=1), # [12*2, 2, 2]
+    )
+
+  def forward(self, x):
+    return self.layers(x)
+
+
+class HierVAE(VAE):
+  # Applying sigmoid after decoder output may keep KL loss staying near 0 during training.
+  # A KL loss near 0 indicates the model is not learning meaningful features from data, 
+  #   but merely fitting to a standard normal distribution.
+  # The expected behavior is that KL loss first decreases, then slowly rises and stabilizes.
+  # Using sigmoid causes gradients to vanish when input absolute values are large, 
+  #   preventing gradients from propagating back through the decoder to the latent variable z.
+  # Use the kl_weight coefficient to control the impact of the KL loss.
+  def __init__(self, kl_weight=0.5):
+    nn.Module.__init__(self)
+    self.kl_weight = kl_weight
+
+    self.encoder1 = HierVAEEncoderLayer()
+    self.encoder2 = HierVAEEncoderLayer()
+    self.decoder = nn.Sequential(
+      nn.ConvTranspose2d(12, 64, 3, padding=1), # [64, 2, 2]
+      nn.ReLU(),
+      nn.ConvTranspose2d(64, 64, 4, stride=2, padding=1), # [64, 4, 4]
+      nn.ReLU(),
+      nn.ConvTranspose2d(64, 64, 4, stride=2, padding=1), # [64, 8, 8]
+      nn.ReLU(),
+      nn.ConvTranspose2d(64, 64, 4, stride=2, padding=1), # [64, 16, 16]
+      nn.ReLU(),
+      nn.ConvTranspose2d(64, 32, 4, stride=2, padding=1), # [32, 32, 32]
+      nn.ReLU(),
+      nn.Conv2d(32, 3, 3, padding=1), # [3, 32, 32]
+    )
+    # p(z2|z1) learn only the mean
+    self.prior = nn.Sequential(
+      nn.Conv2d(12, 64, 3, padding=1), # [64, 2, 2]
+      nn.ReLU(),
+      nn.Conv2d(64, 64, 3, padding=1), # [64, 2, 2]
+      nn.ReLU(),
+      nn.Conv2d(64, 12, 3, padding=1) # [12, 2, 2]
+    )
+
+  def encode_helper(self, x):
+    N, _, H, W = x.shape
+
+    # x -> z1
+    z0 = torch.zeros((N, 12, H, W), device=next(self.parameters()).device)
+    z0_and_x = torch.cat((z0, x), dim=1)
+    z1_mean_var = self.encoder1(z0_and_x)
+    z1_mean, z1_var_log = torch.split(z1_mean_var, (12, 12), dim=1)
+    z1_var = torch.exp(z1_var_log)
+    z1 = self.reparameterize(z1_mean, z1_var)
+
+    # z1, x -> z2
+    z2_mean_prior = self.prior(z1)  # prior z2 mean given z1
+    z2_var_prior = torch.ones_like(z2_mean_prior)
+    # upscale z1 with nearest-neighbor projection
+    z1_upscaled = F.interpolate(z1, size=(H, W), mode="nearest")
+    z1_and_x = torch.cat((z1_upscaled, x), dim=1)
+    z2_residual_mean_var = self.encoder2(z1_and_x)
+    z2_residual_mean, z2_residual_var_log = torch.split(z2_residual_mean_var, (12, 12), dim=1)
+    z2_residual_var = torch.exp(z2_residual_var_log)
+
+    z2_mean = z2_mean_prior + z2_residual_mean
+    z2_var = z2_var_prior * z2_residual_var
+
+    # terms for kl_z2
+    z2_residual_logstd = z2_residual_var_log / 2
+    z2_residual_mu = z2_residual_mean
+
+    return z1_mean, z1_var, z1_var_log, z2_mean, z2_var, z2_residual_logstd, z2_residual_mu
+
+  def encode(self, x):
+    _, _, _, z2_mean, z2_var, _, _ = self.encode_helper(x)
+    return z2_mean, z2_var
+
+  def decode(self, z):
+    x = self.decoder(z)
+    x_var = torch.zeros_like(x)  # set var=0 -> x = x_mean
+    return x, x_var
+
+  def loss(self, x):
+    N = x.shape[0]
+
+    z1_mean, z1_var, z1_var_log, z2_mean, z2_var, z2_residual_logstd, z2_residual_mu = self.encode_helper(x)
+    z2 = self.reparameterize(z2_mean, z2_var)
+
+    kl_z1 = 0.5 * (-z1_var_log - 1 + z1_mean**2 + z1_var)
+    # formula for kl_z2 is given
+    kl_z2 = -z2_residual_logstd - 0.5 + (torch.exp(2 * z2_residual_logstd) + z2_residual_mu ** 2) * 0.5
+    kl = kl_z1 + kl_z2
+    kl = torch.sum(kl, dim=(1, 2, 3))
+    kl_loss = torch.mean(kl, dim=0)
+
+    recon_x, _ = self.decode(z2)
+    recon_loss = F.mse_loss(recon_x, x, reduction='sum') / N
+
+    weighted_kl_loss = self.kl_weight * kl_loss
+
+    neg_elbo = recon_loss + weighted_kl_loss
+
+    return neg_elbo, recon_loss, kl_loss
+
+  def sample(self, num_samples):
+    z1 = torch.randn((num_samples, 12, 2, 2), device=next(self.parameters()).device)
+    with torch.no_grad():
+      z2_mean = self.prior(z1)
+      z2_var = torch.ones_like(z2_mean)
+      z2 = self.reparameterize(z2_mean, z2_var)
+
+      x, _ = self.decode(z2)
+    return x
