@@ -14,5 +14,8 @@ from .transformer import *
 
 ### HW 2
 
-# q1's, q2ab's and q3's model
+# q1's and q2ab's model
 from .vae import *
+
+# q3's model
+from .vqvae import *
