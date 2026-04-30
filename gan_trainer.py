@@ -6,18 +6,17 @@ from tqdm.auto import tqdm
 
 class GANTrainer:
   def __init__(self, model, k, train_dataset, batch_size,
-              lr, epochs, lr_scheduler=None, device='cpu'):
+              lr, epochs, betas=(0.9, 0.999), device='cpu'):
     self.model = model.to(device)
     self.k = k
     self.device = device
     self.batch_size = batch_size
     self.epochs = epochs
-    self.lr_scheduler = lr_scheduler
 
     self.train_loader = DataLoader(train_dataset, batch_size, shuffle=True)
 
-    self.d_opt = Adam(model.discriminator.parameters(), lr=lr)
-    self.g_opt = Adam(model.generator.parameters(), lr=lr)
+    self.d_opt = Adam(model.discriminator.parameters(), lr=lr, betas=betas)
+    self.g_opt = Adam(model.generator.parameters(), lr=lr, betas=betas)
 
     self.epoch = 0
     self.train_losses = []

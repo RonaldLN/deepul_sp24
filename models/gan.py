@@ -21,16 +21,17 @@ class ThreeLayerMLP(nn.Module):
 
 
 class GAN(nn.Module):
-  def __init__(self, data_shape):
+  def __init__(self, data_shape, latent_dim=1):
     super().__init__()
     self.data_shape = data_shape
+    self.latent_dim = latent_dim
 
     in_dim = torch.prod(torch.tensor(data_shape)).item()
-    self.generator = ThreeLayerMLP(in_dim, hidden_dim=128, out_dim=in_dim)
+    self.generator = ThreeLayerMLP(in_dim=latent_dim, hidden_dim=128, out_dim=in_dim)
     self.discriminator = ThreeLayerMLP(in_dim, hidden_dim=128, out_dim=1)
 
   def generate(self, n):
-    noise = torch.randn(n, *self.data_shape, device=next(self.parameters()).device)
+    noise = torch.randn(n, self.latent_dim, device=next(self.parameters()).device)
     fake_data = self.generator(noise)
     return fake_data
 

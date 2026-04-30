@@ -24,3 +24,6 @@ from .vqvae import *
 
 # q1ab's model
 from .gan import *
+
+# q2's model
+from .wgan_gp import *
