@@ -66,3 +66,12 @@ class GAN(nn.Module):
       logits = self.discriminator(data)
       probs = torch.sigmoid(logits)
       return probs
+
+
+class NonSaturatingGAN(GAN):
+  def generator_loss(self, n):
+    fake_data = self.generate(n)  # G(z)
+    logits_fake = self.discriminator(fake_data)  # D(G(z)) (logits)
+    # min log(1-D(G(Z))) => max log(D(G(z))) => min -log(D(G(Z)))
+    g_loss = F.binary_cross_entropy_with_logits(logits_fake, torch.ones_like(logits_fake))  # -log(D(G(Z)))
+    return g_loss
