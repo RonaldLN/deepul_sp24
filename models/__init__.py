@@ -19,3 +19,8 @@ from .vae import *
 
 # q3's model
 from .vqvae import *
+
+### HW 3
+
+# q1ab's model
+from .gan import *

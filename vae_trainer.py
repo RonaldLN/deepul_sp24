@@ -58,7 +58,7 @@ class VAETrainer:
 
   def train(self):
     device = self.device
-    self.model.to(device)
+    self.model = self.model.to(device)
 
     _, init_total_loss = self.train_val(is_train=False)
     self.test_losses.append(init_total_loss)
