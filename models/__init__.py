@@ -27,3 +27,6 @@ from .gan import *
 
 # q2's model
 from .wgan_gp import *
+
+# q3ab's model
+from .vqgan import *
