@@ -74,17 +74,6 @@ class ViTVQGANEncoder(nn.Module):
     encoder_layer = ViTEncoderLayer(embed_dim, num_heads, dim_feedforward, dropout)
     self.transformer = ViTEncoder(encoder_layer, num_layers)
 
-    self.apply(self._init_weights)
-
-  def _init_weights(self, module):
-    if isinstance(module, (nn.Linear, nn.Embedding)):
-      module.weight.data.normal_(mean=0.0, std=0.02)
-      if isinstance(module, nn.Linear) and module.bias is not None:
-        module.bias.data.zero_()
-      elif isinstance(module, nn.LayerNorm):
-        module.bias.data.zero_()
-        module.weight.data.fill_(1.0)
-
   def forward(self, x):
     x = self.patch_embed(x)  # (N, H/P * W/P, D)
     num_patches = x.shape[1]
@@ -103,17 +92,6 @@ class ViTVQGANDecoder(nn.Module):
     self.transformer = ViTEncoder(encoder_layer, num_layers)
 
     self.patch_to_image = PatchToImage(img_size, patch_size, in_channels, embed_dim)
-
-    self.apply(self._init_weights)
-
-  def _init_weights(self, module):
-    if isinstance(module, (nn.Linear, nn.Embedding)):
-      module.weight.data.normal_(mean=0.0, std=0.02)
-      if isinstance(module, nn.Linear) and module.bias is not None:
-        module.bias.data.zero_()
-      elif isinstance(module, nn.LayerNorm):
-        module.bias.data.zero_()
-        module.weight.data.fill_(1.0)
 
   def forward(self, x):
     num_patches = x.shape[1]

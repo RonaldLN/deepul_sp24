@@ -90,8 +90,9 @@ class ViTVQGANVQVAE(VQGANVQVAE):
                                    num_layers=4, num_heads=8, dim_feedforward=2*256, max_length=8*8, dropout=0.1)
     self.decoder = ViTVQGANDecoder(img_size=32, patch_size=4, in_channels=3, embed_dim=256,
                                    num_layers=4, num_heads=8, dim_feedforward=2*256, max_length=8*8, dropout=0.1)
-    # Initialize codebook with uniform(-1/K, 1/K)
-    self.codebook = nn.Parameter(torch.empty(k, 256).uniform_(-1/k, 1/k))
+    # # Initialize codebook with uniform(-1/K, 1/K)
+    # self.codebook = nn.Parameter(torch.empty(k, 256).uniform_(-1/k, 1/k))
+    self.codebook = nn.Parameter(torch.randn(k, 256))
 
   def _quantize(self, x):
     z_e = self.encoder(x)  # (N, H/P * W/P, D)
@@ -117,7 +118,7 @@ class ViTVQGANVQVAE(VQGANVQVAE):
     vq_loss = F.mse_loss(z_q, z_e.detach())
     commitment_loss = F.mse_loss(z_e, z_q.detach())
 
-    loss = recon_loss + vq_loss + self.beta * commitment_loss
+    loss = vq_loss + self.beta * commitment_loss
 
     return loss, recon_loss, recon_x
 
@@ -141,6 +142,14 @@ class ViTVQGAN(VQGAN):
       GlobalSumPooling(),  # global sum pooling
       nn.Linear(128, 1)
     )
+    # replace ReLU with LeakyReLU
+    def replace_relu_with_leakyrelu(module):
+      for name, child in module.named_children():
+        if isinstance(child, nn.ReLU):
+          setattr(module, name, nn.LeakyReLU(0.2))
+        else:
+          replace_relu_with_leakyrelu(child)
+    replace_relu_with_leakyrelu(self.discriminator)
     # apply spectral norm to weight matrices
     for m in self.discriminator.modules():
       if isinstance(m, (nn.Linear, nn.Conv2d, nn.ConvTranspose2d)):
