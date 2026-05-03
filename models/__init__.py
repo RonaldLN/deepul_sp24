@@ -30,3 +30,6 @@ from .wgan_gp import *
 
 # q3ab's model
 from .vqgan import *
+
+# q4's model
+from .cyclegan import *
