@@ -33,3 +33,8 @@ from .vqgan import *
 
 # q4's model
 from .cyclegan import *
+
+### HW 4
+
+# q1's, q2's and q3bc's model
+from .diffusion import *
