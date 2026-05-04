@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from tqdm.auto import tqdm
+from .unet import *
 
 
 class ContinuousDiffusion(nn.Module):
@@ -94,3 +95,33 @@ class ContinuousDiffusionWithMLP(ContinuousDiffusion):
     )
     data_shape = (in_dim,)
     super().__init__(model, data_shape)
+
+
+class ContinuousDiffusionWithUNet(ContinuousDiffusion):
+  def __init__(self, in_channels, hidden_dims, blocks_per_dim, data_shape):
+    unet = UNet(in_channels, hidden_dims, blocks_per_dim)
+    super().__init__(unet, data_shape)
+
+  def predict_eps(self, x, t):
+    N = x.shape[0]
+    # UNet needs a t of shape (N,)
+    if t.dim() == 0:  # sampling
+      t = t.expand(N)
+    elif t.dim() > 1:  # training
+      t = t.view(N)  # (N, 1, 1, ...) -> (N,)
+    return self.model(x, t)
+
+  def ddpm_update(self, x, eps_hat, i, coeffs):
+    alpha_t = coeffs["alphas"][i]
+    alpha_tm1 = coeffs["alphas"][i+1]
+    sigma_t = coeffs["sigmas"][i]
+    sigma_tm1 = coeffs["sigmas"][i+1]
+    eta_t = coeffs["etas"][i]
+    eps_t = torch.randn_like(x)
+    var = torch.clamp(sigma_tm1**2 - eta_t**2, min=0.0)  # clip sigma_t-1^2 - eta_t^2
+    x_hat = (x - sigma_t * eps_hat) / alpha_t
+    x_hat = torch.clamp(x_hat, min=-1.0, max=1.0)  # clip x_hat to [-1, 1]
+    x_tm1 = alpha_tm1 * x_hat \
+          + torch.sqrt(var) * eps_hat \
+          + eta_t * eps_t
+    return x_tm1
