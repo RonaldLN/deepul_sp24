@@ -13,7 +13,20 @@ class ContinuousDiffusion(nn.Module):
 
     self.model = model
 
-  def predict_eps(self, x, t, *args):
+  def cfg_predict_eps(self, x, t, *args, cfg_scale):
+    y = args[0]
+    y_null = torch.full_like(y, self.null_class_idx)
+
+    eps_hat_cond = self.model(x, *args, t)
+    eps_hat_uncond = self.model(x, y_null, t)
+
+    eps_hat = eps_hat_uncond + cfg_scale * (eps_hat_cond - eps_hat_uncond)
+    return eps_hat
+
+  def predict_eps(self, x, t, *args, cfg_scale=None):
+    if cfg_scale is not None:
+      return self.cfg_predict_eps(x, t, *args, cfg_scale=cfg_scale)
+
     eps_hat = self.model(x, *args, t)
     return eps_hat
 
@@ -123,6 +136,7 @@ class ContinuousDiffusionWithTransformer(ContinuousDiffusion):
     model = DiT(input_shape, patch_size, hidden_size, num_heads,
                num_layers, num_classes, cfg_dropout_prob)
     super().__init__(model, input_shape)
+    self.null_class_idx = num_classes
 
   def ddpm_update(self, x, eps_hat, i, coeffs):
     alpha_t = coeffs["alphas"][i]
@@ -139,7 +153,7 @@ class ContinuousDiffusionWithTransformer(ContinuousDiffusion):
           + eta_t * eps_t
     return x_tm1
 
-  def sample(self, num_samples, num_steps, class_idxs):
+  def sample(self, num_samples, num_steps, class_idxs, cfg_scale=None):
     assert class_idxs.dim() == 1 and class_idxs.shape[0] == num_samples
 
     device = next(self.parameters()).device
@@ -150,6 +164,6 @@ class ContinuousDiffusionWithTransformer(ContinuousDiffusion):
       for i in tqdm(range(num_steps), desc="Generating samples (steps)"):
         t = coeffs["ts"][i]
         t = t.expand(num_samples)  # (N,)
-        eps_hat = self.predict_eps(x, t, class_idxs)
+        eps_hat = self.predict_eps(x, t, class_idxs, cfg_scale=cfg_scale)
         x = self.ddpm_update(x, eps_hat, i, coeffs)
     return x
