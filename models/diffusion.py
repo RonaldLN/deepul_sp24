@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from tqdm.auto import tqdm
 from .unet import *
+from .dit import *
 
 
 class ContinuousDiffusion(nn.Module):
@@ -12,29 +13,20 @@ class ContinuousDiffusion(nn.Module):
 
     self.model = model
 
-  def predict_eps(self, x, t):
-    N = x.shape[0]
-    if t.dim() == 0:  # sampling
-      t = t.expand(N, 1)
-
-    # Expand t to match the spatial dimensions H, W of x
-    if x.dim() > 2:
-      t = t.expand(-1, -1, *x.shape[2:])
-
-    x_with_t = torch.cat((x, t), dim=1)
-    eps_hat = self.model(x_with_t)
+  def predict_eps(self, x, t, *args):
+    eps_hat = self.model(x, *args, t)
     return eps_hat
 
-  def loss(self, x):
+  def loss(self, x, *args):
     N = x.shape[0]
     t = torch.rand(N, device=next(self.parameters()).device)
-    t = t.view(-1, *(1,) * (x.dim() - 1))  # (N,) -> (N, 1, 1, ...) for broadcasting with x
-    alpha_t = torch.cos(torch.pi/2 * t)
-    sigma_t = torch.sin(torch.pi/2 * t)
+    t_broadcast = t.view(-1, *(1,) * (x.dim() - 1))  # (N,) -> (N, 1, 1, ...) for broadcasting with x
+    alpha_t = torch.cos(torch.pi/2 * t_broadcast)
+    sigma_t = torch.sin(torch.pi/2 * t_broadcast)
     eps = torch.randn_like(x)
     x_t = alpha_t * x + sigma_t * eps
 
-    eps_hat = self.predict_eps(x_t, t)
+    eps_hat = self.predict_eps(x_t, t, *args)
     loss = F.mse_loss(eps, eps_hat)
     return loss
 
@@ -75,6 +67,7 @@ class ContinuousDiffusion(nn.Module):
       coeffs = self.prepare_coeffs(num_steps)
       for i in tqdm(range(num_steps), desc="Generating samples (steps)"):
         t = coeffs["ts"][i]
+        t = t.expand(num_samples)  # (N,)
         eps_hat = self.predict_eps(x, t)
         x = self.ddpm_update(x, eps_hat, i, coeffs)
     return x
@@ -96,20 +89,17 @@ class ContinuousDiffusionWithMLP(ContinuousDiffusion):
     data_shape = (in_dim,)
     super().__init__(model, data_shape)
 
+  def predict_eps(self, x, t):
+    t = t.view(-1, 1)
+    x_with_t = torch.cat((x, t), dim=1)
+    eps_hat = self.model(x_with_t)
+    return eps_hat
+
 
 class ContinuousDiffusionWithUNet(ContinuousDiffusion):
   def __init__(self, in_channels, hidden_dims, blocks_per_dim, data_shape):
     unet = UNet(in_channels, hidden_dims, blocks_per_dim)
     super().__init__(unet, data_shape)
-
-  def predict_eps(self, x, t):
-    N = x.shape[0]
-    # UNet needs a t of shape (N,)
-    if t.dim() == 0:  # sampling
-      t = t.expand(N)
-    elif t.dim() > 1:  # training
-      t = t.view(N)  # (N, 1, 1, ...) -> (N,)
-    return self.model(x, t)
 
   def ddpm_update(self, x, eps_hat, i, coeffs):
     alpha_t = coeffs["alphas"][i]
@@ -125,3 +115,41 @@ class ContinuousDiffusionWithUNet(ContinuousDiffusion):
           + torch.sqrt(var) * eps_hat \
           + eta_t * eps_t
     return x_tm1
+
+
+class ContinuousDiffusionWithTransformer(ContinuousDiffusion):
+  def __init__(self, input_shape, patch_size, hidden_size, num_heads,
+               num_layers, num_classes, cfg_dropout_prob):
+    model = DiT(input_shape, patch_size, hidden_size, num_heads,
+               num_layers, num_classes, cfg_dropout_prob)
+    super().__init__(model, input_shape)
+
+  def ddpm_update(self, x, eps_hat, i, coeffs):
+    alpha_t = coeffs["alphas"][i]
+    alpha_tm1 = coeffs["alphas"][i+1]
+    sigma_t = coeffs["sigmas"][i]
+    sigma_tm1 = coeffs["sigmas"][i+1]
+    eta_t = coeffs["etas"][i]
+    eps_t = torch.randn_like(x)
+    var = torch.clamp(sigma_tm1**2 - eta_t**2, min=0.0)  # clip sigma_t-1^2 - eta_t^2
+    x_hat = (x - sigma_t * eps_hat) / alpha_t
+    x_hat = torch.clamp(x_hat, min=-8.0, max=8.0)  # clip x_hat to [-8, 8]
+    x_tm1 = alpha_tm1 * x_hat \
+          + torch.sqrt(var) * eps_hat \
+          + eta_t * eps_t
+    return x_tm1
+
+  def sample(self, num_samples, num_steps, class_idxs):
+    assert class_idxs.dim() == 1 and class_idxs.shape[0] == num_samples
+
+    device = next(self.parameters()).device
+    class_idxs = class_idxs.to(device)  # (N,)
+    x = torch.randn(num_samples, *self.data_shape, device=device)
+    with torch.no_grad():
+      coeffs = self.prepare_coeffs(num_steps)
+      for i in tqdm(range(num_steps), desc="Generating samples (steps)"):
+        t = coeffs["ts"][i]
+        t = t.expand(num_samples)  # (N,)
+        eps_hat = self.predict_eps(x, t, class_idxs)
+        x = self.ddpm_update(x, eps_hat, i, coeffs)
+    return x
